@@ -1,0 +1,11 @@
+idf_component_register(
+                    SRCS 
+                        "src/Wifi_Driver.c"
+                    INCLUDE_DIRS 
+                        "include"
+                        "../../secrets"
+                    PRIV_REQUIRES
+                        nvs_flash 
+                        esp_wifi
+                        esp_event
+                    )

@@ -1,0 +1,8 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.extensionActivationMode": "always",
+  "idf.customExtraVars": {},
+  "idf.flashType": "UART",
+  "idf.portWin": "COM3",
+  "idf.currentSetup": "C:\\esp\\v5.3.5\\esp-idf"
+}
