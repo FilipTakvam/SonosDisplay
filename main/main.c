@@ -21,18 +21,24 @@ void sonos_task(void *pvParameters)
     if (device)
     {
         ESP_LOGI(TAG, "Found Sonos device '%s' - %s", device->deviceName, device->Ipv4);
-        free(device);
     }
     else
     {
         ESP_LOGW(TAG, "Device not found");
     }
 
+    sonos_start_notify();
+    ESP_LOGI(TAG, "Subscribing to device at %s", device->Ipv4);
+    sonos_subscribe(device);
+    free(device);
+
     vTaskDelete(NULL);
 }
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Free heap at start: %lu", esp_get_free_heap_size());
+
     esp_err_t ret = nvs_flash_init();
 
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -44,6 +50,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(ret);
 
+    ESP_LOGI(TAG, "Free heap after NVS: %lu", esp_get_free_heap_size());
+
     wifi_driver_init();
 
     // Wait until Wi-Fi is fully connected (GOT_IP)
@@ -53,7 +61,8 @@ void app_main(void)
         pdFALSE,
         pdTRUE,
         portMAX_DELAY);
-
+    
+    ESP_LOGI(TAG, "Free heap after WiFi: %lu", esp_get_free_heap_size());
     ESP_LOGI(TAG, "Network ready, starting Sonos...");
 
     xTaskCreate(
@@ -63,4 +72,6 @@ void app_main(void)
         NULL,
         5,
         NULL);
+
+    ESP_LOGI(TAG, "Free heap after task create: %lu", esp_get_free_heap_size());
 }

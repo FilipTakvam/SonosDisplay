@@ -9,6 +9,8 @@
 #include "lwip/inet.h"
 
 #include "esp_http_client.h"
+#include "esp_http_server.h"
+#include "esp_netif.h"
 
 #include "tinyxml2.h"
 
@@ -254,4 +256,210 @@ sonos_device_t *sonos_find_device(const char *name)
     ESP_LOGW(TAG, "No device named '%s' found", name);
     free(devices);
     return NULL;
+}
+
+static bool retrieve_own_ip(char *ip_out, size_t ip_size)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    if (!netif)
+    {
+        ESP_LOGE(TAG, "Failed to get netif handle");
+        return false;
+    }
+
+    esp_netif_ip_info_t ip_info;
+
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to get the IP info of the client");
+        return false;
+    }
+
+    esp_ip4addr_ntoa(&ip_info.ip, ip_out, ip_size);
+    return true;
+} 
+
+static httpd_handle_t notifyServer = NULL;
+
+static char last_track_uri[256] = {0};
+
+static bool parse_notify(const char *body, char *album_art_uri_out, size_t album_art_uri_size,
+                                           char *track_uri_out,     size_t track_uri_size)
+{
+    tinyxml2::XMLDocument outer;
+    if (outer.Parse(body) != tinyxml2::XML_SUCCESS)
+    {
+        ESP_LOGE(TAG, "Failed to parse outer NOTIFY XML");
+        return false;
+    }
+
+    tinyxml2::XMLElement *propertyset = outer.RootElement();
+    tinyxml2::XMLElement *property    = propertyset ? propertyset->FirstChildElement("e:property") : nullptr;
+    tinyxml2::XMLElement *lastChange  = property ? property->FirstChildElement("LastChange") : nullptr;
+
+    if (!lastChange || !lastChange->GetText())
+    {
+        ESP_LOGE(TAG, "LastChange not found");
+        return false;
+    }
+
+    tinyxml2::XMLDocument inner;
+    if (inner.Parse(lastChange->GetText()) != tinyxml2::XML_SUCCESS)
+    {
+        ESP_LOGE(TAG, "Failed to parse LastChange XML");
+        return false;
+    }
+
+    tinyxml2::XMLElement *event      = inner.RootElement();
+    tinyxml2::XMLElement *instanceID = event ? event->FirstChildElement("InstanceID") : nullptr;
+
+    if (!instanceID)
+    {
+        ESP_LOGE(TAG, "InstanceID not found");
+        return false;
+    }
+
+    // Extract CurrentTrackURI
+    tinyxml2::XMLElement *trackURI = instanceID->FirstChildElement("CurrentTrackURI");
+    if (!trackURI || !trackURI->Attribute("val"))
+    {
+        ESP_LOGE(TAG, "CurrentTrackURI not found");
+        return false;
+    }
+    strncpy(track_uri_out, trackURI->Attribute("val"), track_uri_size - 1);
+    track_uri_out[track_uri_size - 1] = '\0';
+
+    // Extract albumArtURI from CurrentTrackMetaData
+    tinyxml2::XMLElement *metaData = instanceID->FirstChildElement("CurrentTrackMetaData");
+    if (!metaData || !metaData->Attribute("val"))
+    {
+        ESP_LOGE(TAG, "CurrentTrackMetaData not found");
+        return false;
+    }
+
+    tinyxml2::XMLDocument didl;
+    if (didl.Parse(metaData->Attribute("val")) != tinyxml2::XML_SUCCESS)
+    {
+        ESP_LOGE(TAG, "Failed to parse DIDL-Lite XML");
+        return false;
+    }
+
+    tinyxml2::XMLElement *item     = didl.RootElement() ? didl.RootElement()->FirstChildElement("item") : nullptr;
+    tinyxml2::XMLElement *albumArt = item ? item->FirstChildElement("upnp:albumArtURI") : nullptr;
+
+    if (!albumArt || !albumArt->GetText())
+    {
+        ESP_LOGE(TAG, "albumArtURI not found");
+        return false;
+    }
+
+    strncpy(album_art_uri_out, albumArt->GetText(), album_art_uri_size - 1);
+    album_art_uri_out[album_art_uri_size - 1] = '\0';
+
+    return true;
+}
+
+static esp_err_t notify_handler(httpd_req_t *req)
+{
+    char *body = (char*)malloc(NOTIFY_MALLOC_SIZE);
+
+    if (!body)
+    {
+        ESP_LOGE(TAG, "Out of memory for the NOTIFY body");
+        return ESP_FAIL;
+    }
+
+    int received = httpd_req_recv(req, body, NOTIFY_MALLOC_SIZE - 1);
+    int chunk;
+    while ((chunk = httpd_req_recv(req, body + received, NOTIFY_MALLOC_SIZE - 1 - received)) > 0)
+    {
+        received += chunk;
+    }
+
+    body[received] = 0;
+
+    char track_uri[256]     = {0};
+    char album_art_uri[256] = {0};
+
+    if (parse_notify(body, album_art_uri, sizeof(album_art_uri),
+                           track_uri,     sizeof(track_uri)))
+    {
+        if (strcmp(track_uri, last_track_uri) != 0)
+        {
+            strncpy(last_track_uri, track_uri, sizeof(last_track_uri) - 1);
+            ESP_LOGI(TAG, "Album art uri: %s", album_art_uri);
+        }
+    }
+
+    free(body);
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+void sonos_start_notify(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 8080;
+    config.stack_size = 16384;
+
+    if (httpd_start(&notifyServer, &config) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to start HTTP server for NOTIFY");
+        return;
+    }
+
+    httpd_uri_t notifyURI = {
+        .uri = "/notify",
+        .method = (httpd_method_t)25,
+        .handler = notify_handler,
+    };
+
+    httpd_register_uri_handler(notifyServer, &notifyURI);
+    ESP_LOGI(TAG, "Notify server started on port 8080");
+}
+
+void sonos_subscribe(const sonos_device_t *device)
+{
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s:1400/MediaRenderer/AVTransport/Event", device->Ipv4);
+
+    char ownIP[16];
+
+    if (!retrieve_own_ip(ownIP, sizeof(ownIP)))
+    {
+        return;
+    }
+
+    char callback[64];
+    snprintf(callback, sizeof(callback), "<http://%s:8080/notify>", ownIP);
+    
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_SUBSCRIBE,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    if (!client)
+    {
+        ESP_LOGE(TAG, "Failed to initialize http client for SUBSCRIBE");
+        return;
+    }
+
+    esp_http_client_set_header(client, "callback", callback);
+    esp_http_client_set_header(client, "NT","upnp:event");
+    esp_http_client_set_header(client, "Timeout", "Second-3600");
+
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SUBSCRIBE event failed");
+    }
+
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "SUBSCRIBE event response %d", status);
+
+    esp_http_client_cleanup(client);
 }
