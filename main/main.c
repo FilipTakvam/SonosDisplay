@@ -15,8 +15,15 @@ static const char *TAG = "MAIN";
 void sonos_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Starting Sonos discovery...");
-    
-    sonos_discovery_start();
+
+    sonos_device_t *devices = NULL;
+    int count = 0;
+
+    sonos_discovery_start(&devices, &count);
+
+    ESP_LOGI(TAG, "Found %d Sonos device(s)", count);
+
+    free(devices);
 
     vTaskDelete(NULL);
 }
@@ -42,8 +49,7 @@ void app_main(void)
         WIFI_CONNECTED_BIT,
         pdFALSE,
         pdTRUE,
-        portMAX_DELAY
-    );
+        portMAX_DELAY);
 
     ESP_LOGI(TAG, "Network ready, starting Sonos...");
 

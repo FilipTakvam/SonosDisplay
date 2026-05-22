@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "esp_log.h"
 #include "lwip/sockets.h"
@@ -43,11 +44,13 @@ static void send_msearch(int sock)
     ESP_LOGI(TAG, "M-SEARCH sent");
 }
 
-static void listen_responses(int sock)
+static sonos_device_t *listen_responses(int sock, int *count_out)
 {
-    char buffer[1024];
+    char buffer[2048];
     struct sockaddr_in source_addr;
     socklen_t addr_len = sizeof(source_addr);
+    sonos_device_t *devices = NULL;
+    int deviceCount = 0;
 
     while (1)
     {
@@ -57,20 +60,61 @@ static void listen_responses(int sock)
         if (len > 0)
         {
             buffer[len] = 0;
-            ESP_LOGI(TAG, "Response from %s:\n%s",
-                     inet_ntoa(source_addr.sin_addr), buffer);
-            break;
+            char IPv4[16];
+            inet_ntop(AF_INET, &source_addr.sin_addr, IPv4, sizeof(IPv4));
+
+            // Seems to be that a device can be reply more than once - skip duplicates
+            bool duplicate = false;
+
+            for (int i = 0; i < deviceCount; i++)
+            {
+                if(strcmp(devices[i].Ipv4, IPv4) == 0)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+            {
+                sonos_device_t *tmp = (sonos_device_t*)realloc(devices, (deviceCount +1) * sizeof(sonos_device_t));
+
+                if (!tmp)
+                {
+                    ESP_LOGE(TAG, "Out of memory while discovering Sonos devices");
+                    break;
+                }
+
+                devices = tmp;
+                strncpy(devices[deviceCount].Ipv4, IPv4, sizeof(devices[deviceCount].Ipv4) - 1);
+                devices[deviceCount].Ipv4[sizeof(devices[deviceCount].Ipv4) - 1] = 0;
+                ESP_LOGI(TAG, "Found Sonos device with IPv4 %s", devices[deviceCount].Ipv4);
+                deviceCount++;
+            }
         }
         else
         {
-            ESP_LOGE(TAG, "Timeout - No speaker responded");
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                ESP_LOGI(TAG, "Discovery complete - found %d device(s)", deviceCount);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "recv error: %d", errno);
+            }
             break;
         }
     }
+
+    *count_out = deviceCount;
+    return devices;
 }
 
-void sonos_discovery_start()
+void sonos_discovery_start(sonos_device_t **devices_out, int *count_out)
 {
+    *devices_out = NULL;
+    *count_out = 0;
+
     // Gives an IPv4 UDP socket.(AF_INET = IPv4, SOCK_DGRAM = Datagram socket - UDP, IPPROTO_IP = default protocol for this socket type)
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
 
@@ -91,7 +135,7 @@ void sonos_discovery_start()
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     send_msearch(sock);
-    listen_responses(sock);
+    *devices_out = listen_responses(sock, count_out);
 
     close(sock);
 }
