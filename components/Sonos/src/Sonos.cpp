@@ -7,6 +7,8 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
+#include "tinyxml2.h"
+
 static const char *TAG = "SONOS";
 
 #define SSDP_IP   "239.255.255.250"

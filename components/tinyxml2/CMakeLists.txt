@@ -1,5 +1,4 @@
 idf_component_register(
-    SRCS "src/Sonos.cpp"
+    SRCS "src/tinyxml2.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES tinyxml2
 )
