@@ -16,14 +16,17 @@ void sonos_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Starting Sonos discovery...");
 
-    sonos_device_t *devices = NULL;
-    int count = 0;
+    sonos_device_t *device = sonos_find_device("Kök");
 
-    sonos_discovery_start(&devices, &count);
-
-    ESP_LOGI(TAG, "Found %d Sonos device(s)", count);
-
-    free(devices);
+    if (device)
+    {
+        ESP_LOGI(TAG, "Found Sonos device '%s' - %s", device->deviceName, device->Ipv4);
+        free(device);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Device not found");
+    }
 
     vTaskDelete(NULL);
 }
