@@ -11,6 +11,8 @@
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_netif.h"
+#include "esp_crt_bundle.h"
+#include "tjpgd.h"
 
 #include "tinyxml2.h"
 
@@ -26,6 +28,8 @@ static const char *M_SEARCH_MSG =
     "MX: 2\r\n"
     "ST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n"
     "\r\n";
+
+static bool decode_album_art(const char *url);
 
 static bool parse_room_name(const char *xml, char *room_name_out, size_t room_name_size)
 {
@@ -70,6 +74,7 @@ static bool fetch_device_description(const char *url, char *xml_out, size_t xml_
     }
 
     esp_err_t err = esp_http_client_open(client, 0);
+    esp_http_client_fetch_headers(client);
 
     if (err != ESP_OK)
     {
@@ -77,8 +82,6 @@ static bool fetch_device_description(const char *url, char *xml_out, size_t xml_
         esp_http_client_cleanup(client);
         return false;
     }
-
-    int content_length = esp_http_client_fetch_headers(client);
 
     int read = esp_http_client_read(client, xml_out, xml_size - 1);
 
@@ -94,6 +97,7 @@ static bool fetch_device_description(const char *url, char *xml_out, size_t xml_
     esp_http_client_cleanup(client);
     return true;
 }
+
 
 // The Simple Service Discovery Protocol (SSDP) M-SEARCH - multicast HTTP-over-UDP request
 static void send_msearch(int sock)
@@ -138,7 +142,7 @@ static sonos_device_t *listen_responses(int sock, int *count_out)
             char deviceDescriptionURL[64];
             snprintf(deviceDescriptionURL, sizeof(deviceDescriptionURL), "http://%s:1400/xml/device_description.xml", IPv4);
 
-            char *xml = (char*)malloc(XML_MALLOC_SIZE);
+            char *xml = (char *)malloc(XML_MALLOC_SIZE);
             if (!xml)
             {
                 ESP_LOGE(TAG, "Out of memory of the XML buufer");
@@ -278,14 +282,14 @@ static bool retrieve_own_ip(char *ip_out, size_t ip_size)
 
     esp_ip4addr_ntoa(&ip_info.ip, ip_out, ip_size);
     return true;
-} 
+}
 
 static httpd_handle_t notifyServer = NULL;
 
 static char last_track_uri[256] = {0};
 
 static bool parse_notify(const char *body, char *album_art_uri_out, size_t album_art_uri_size,
-                                           char *track_uri_out,     size_t track_uri_size)
+                         char *track_uri_out, size_t track_uri_size)
 {
     tinyxml2::XMLDocument outer;
     if (outer.Parse(body) != tinyxml2::XML_SUCCESS)
@@ -295,8 +299,8 @@ static bool parse_notify(const char *body, char *album_art_uri_out, size_t album
     }
 
     tinyxml2::XMLElement *propertyset = outer.RootElement();
-    tinyxml2::XMLElement *property    = propertyset ? propertyset->FirstChildElement("e:property") : nullptr;
-    tinyxml2::XMLElement *lastChange  = property ? property->FirstChildElement("LastChange") : nullptr;
+    tinyxml2::XMLElement *property = propertyset ? propertyset->FirstChildElement("e:property") : nullptr;
+    tinyxml2::XMLElement *lastChange = property ? property->FirstChildElement("LastChange") : nullptr;
 
     if (!lastChange || !lastChange->GetText())
     {
@@ -311,7 +315,7 @@ static bool parse_notify(const char *body, char *album_art_uri_out, size_t album
         return false;
     }
 
-    tinyxml2::XMLElement *event      = inner.RootElement();
+    tinyxml2::XMLElement *event = inner.RootElement();
     tinyxml2::XMLElement *instanceID = event ? event->FirstChildElement("InstanceID") : nullptr;
 
     if (!instanceID)
@@ -345,7 +349,7 @@ static bool parse_notify(const char *body, char *album_art_uri_out, size_t album
         return false;
     }
 
-    tinyxml2::XMLElement *item     = didl.RootElement() ? didl.RootElement()->FirstChildElement("item") : nullptr;
+    tinyxml2::XMLElement *item = didl.RootElement() ? didl.RootElement()->FirstChildElement("item") : nullptr;
     tinyxml2::XMLElement *albumArt = item ? item->FirstChildElement("upnp:albumArtURI") : nullptr;
 
     if (!albumArt || !albumArt->GetText())
@@ -362,7 +366,7 @@ static bool parse_notify(const char *body, char *album_art_uri_out, size_t album
 
 static esp_err_t notify_handler(httpd_req_t *req)
 {
-    char *body = (char*)malloc(NOTIFY_MALLOC_SIZE);
+    char *body = (char *)malloc(NOTIFY_MALLOC_SIZE);
 
     if (!body)
     {
@@ -370,7 +374,7 @@ static esp_err_t notify_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    int received = httpd_req_recv(req, body, NOTIFY_MALLOC_SIZE - 1);
+    int received = 0;
     int chunk;
     while ((chunk = httpd_req_recv(req, body + received, NOTIFY_MALLOC_SIZE - 1 - received)) > 0)
     {
@@ -379,16 +383,17 @@ static esp_err_t notify_handler(httpd_req_t *req)
 
     body[received] = 0;
 
-    char track_uri[256]     = {0};
+    char track_uri[256] = {0};
     char album_art_uri[256] = {0};
 
     if (parse_notify(body, album_art_uri, sizeof(album_art_uri),
-                           track_uri,     sizeof(track_uri)))
+                     track_uri, sizeof(track_uri)))
     {
         if (strcmp(track_uri, last_track_uri) != 0)
         {
             strncpy(last_track_uri, track_uri, sizeof(last_track_uri) - 1);
             ESP_LOGI(TAG, "Album art uri: %s", album_art_uri);
+            decode_album_art(album_art_uri);
         }
     }
 
@@ -433,7 +438,7 @@ void sonos_subscribe(const sonos_device_t *device)
 
     char callback[64];
     snprintf(callback, sizeof(callback), "<http://%s:8080/notify>", ownIP);
-    
+
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_SUBSCRIBE,
@@ -448,7 +453,7 @@ void sonos_subscribe(const sonos_device_t *device)
     }
 
     esp_http_client_set_header(client, "callback", callback);
-    esp_http_client_set_header(client, "NT","upnp:event");
+    esp_http_client_set_header(client, "NT", "upnp:event");
     esp_http_client_set_header(client, "Timeout", "Second-3600");
 
     esp_err_t err = esp_http_client_perform(client);
@@ -462,4 +467,157 @@ void sonos_subscribe(const sonos_device_t *device)
     ESP_LOGI(TAG, "SUBSCRIBE event response %d", status);
 
     esp_http_client_cleanup(client);
+}
+
+typedef struct {
+    esp_http_client_handle_t client;
+    uint8_t chunk[512];
+} jpeg_http_input_t;
+
+static uint8_t rgb_matrix[80][80][3];
+
+static int jpeg_output_callback(JDEC *jd, void *bitmap, JRECT *rect)
+{
+    uint8_t *pixels = (uint8_t*)bitmap;
+    int pixel_idx = 0;
+
+    for (int y = rect->top; y <= rect->bottom; y++)
+    {
+        for (int x = rect->left; x <= rect->right; x++)
+        {
+            if (x < 80 && y < 80)
+            {
+                rgb_matrix[y][x][0] = pixels[pixel_idx + 0];
+                rgb_matrix[y][x][1] = pixels[pixel_idx + 1];
+                rgb_matrix[y][x][2] = pixels[pixel_idx + 2];
+            }
+            pixel_idx += 3;
+        }
+    }
+    return 1;
+}
+
+static uint8_t rgb_matrix_64[64][64][3];
+
+static void downscale_80_to_64(void)
+{
+    for (int y = 0; y < 64; y++)
+    {
+        for (int x = 0; x < 64; x++)
+        {
+            // Map 64x64 output pixel to 80x80 input region
+            float src_x = (x / 64.0f) * 80.0f;
+            float src_y = (y / 64.0f) * 80.0f;
+
+            int x0 = (int)src_x;
+            int y0 = (int)src_y;
+            int x1 = x0 + 1 < 80 ? x0 + 1 : x0;
+            int y1 = y0 + 1 < 80 ? y0 + 1 : y0;
+
+            float fx = src_x - x0;
+            float fy = src_y - y0;
+
+            for (int c = 0; c < 3; c++)
+            {
+                float top    = rgb_matrix[y0][x0][c] * (1 - fx) + rgb_matrix[y0][x1][c] * fx;
+                float bottom = rgb_matrix[y1][x0][c] * (1 - fx) + rgb_matrix[y1][x1][c] * fx;
+                rgb_matrix_64[y][x][c] = (uint8_t)(top * (1 - fy) + bottom * fy);
+            }
+        }
+    }
+}
+// Temporary helper - REMOVE LATER!!!
+void print_rgb_matrix(void)
+{
+    printf("{");
+    for (int y = 0; y < 64; y++)
+    {
+        printf("{");
+        for (int x = 0; x < 64; x++)
+        {
+            printf("{%d,%d,%d}", rgb_matrix_64[y][x][0], rgb_matrix_64[y][x][1], rgb_matrix_64[y][x][2]);
+            if (x < 63) printf(",");
+        }
+        printf("}");
+        if (y < 63) printf(",");
+    }
+    printf("}\n");
+}
+
+static size_t jpeg_input_callback(JDEC *jd, uint8_t *buf, size_t len)
+{
+    jpeg_http_input_t *input = (jpeg_http_input_t*)jd->device;
+
+    int read = esp_http_client_read(input->client, (char*)input->chunk, len);
+    if (read <= 0) return 0;
+
+    if (buf)
+        memcpy(buf, input->chunk, read);
+
+    return read;
+}
+
+static bool decode_album_art(const char *url)
+{
+    esp_http_client_config_t config = {
+        .url               = url,
+        .timeout_ms        = 5000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    if (!client)
+    {
+        ESP_LOGE(TAG, "Failed to init HTTP client for album art");
+        return false;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to open album art connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    esp_http_client_fetch_headers(client);
+
+    JDEC jd;
+    jpeg_http_input_t input = { .client = client };
+
+    void *work = malloc(TJPGD_WORK_SIZE);
+    if (!work)
+    {
+        ESP_LOGE(TAG, "Out of memory for TJpgDec workspace");
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    JRESULT res = jd_prepare(&jd, jpeg_input_callback, work, TJPGD_WORK_SIZE, &input);
+    if (res != JDR_OK)
+    {
+        ESP_LOGE(TAG, "jd_prepare failed: %d", res);
+        free(work);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    res = jd_decomp(&jd, jpeg_output_callback, 3);
+    if (res != JDR_OK)
+    {
+        ESP_LOGE(TAG, "jd_decomp failed: %d", res);
+        free(work);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    downscale_80_to_64();
+    // print_rgb_matrix();
+
+    free(work);
+    esp_http_client_cleanup(client);
+    ESP_LOGI(TAG, "Album art decoded successfully");
+    return true;
 }

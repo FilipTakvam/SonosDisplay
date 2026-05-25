@@ -8,6 +8,7 @@ extern "C" {
 
 #define XML_MALLOC_SIZE 16384
 #define NOTIFY_MALLOC_SIZE 8192
+#define TJPGD_WORK_SIZE 3100
 
 typedef struct {
     char Ipv4[16];
