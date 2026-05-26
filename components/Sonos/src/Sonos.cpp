@@ -526,6 +526,11 @@ static void downscale_80_to_64(void)
         }
     }
 }
+
+uint8_t (*sonos_get_album_art_64(void))[64][3] {
+    return rgb_matrix_64;
+}
+
 // Temporary helper - REMOVE LATER!!!
 void print_rgb_matrix(void)
 {
