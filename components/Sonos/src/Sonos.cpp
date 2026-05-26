@@ -31,6 +31,8 @@ static const char *M_SEARCH_MSG =
 
 static bool decode_album_art(const char *url);
 
+SemaphoreHandle_t sonos_album_art_mutex = NULL;
+
 static bool parse_room_name(const char *xml, char *room_name_out, size_t room_name_size)
 {
     tinyxml2::XMLDocument doc;
@@ -98,8 +100,6 @@ static bool fetch_device_description(const char *url, char *xml_out, size_t xml_
     return true;
 }
 
-
-// The Simple Service Discovery Protocol (SSDP) M-SEARCH - multicast HTTP-over-UDP request
 static void send_msearch(int sock)
 {
     struct sockaddr_in addr;
@@ -163,7 +163,7 @@ static sonos_device_t *listen_responses(int sock, int *count_out)
             }
 
             free(xml);
-            // Seems to be that a device can be reply more than once - skip duplicates
+
             bool duplicate = false;
 
             for (int i = 0; i < deviceCount; i++)
@@ -215,11 +215,9 @@ static sonos_device_t *listen_responses(int sock, int *count_out)
 
 sonos_device_t *sonos_find_device(const char *name)
 {
-
     sonos_device_t *devices = NULL;
     int count = 0;
 
-    // Gives an IPv4 UDP socket.(AF_INET = IPv4, SOCK_DGRAM = Datagram socket - UDP, IPPROTO_IP = default protocol for this socket type)
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
 
     if (sock < 0)
@@ -227,14 +225,10 @@ sonos_device_t *sonos_find_device(const char *name)
         ESP_LOGE(TAG, "Failed to create socket");
         return NULL;
     }
-    // Sets the TTL (Time To Live) for multicast packets.
-    // TTL controls how many router hops a packet is allowed to make before being discarded. 2 means it can cross one router, which is enough for a local network.
+
     int ttl = 2;
     setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
 
-    // Sets a receive timeout on the socket.
-    // Without this, recvfrom in listen_responses would block forever waiting for a packet.
-    // With it, recvfrom gives up and returns an error after 3 seconds, which is how we know discovery is finished.
     struct timeval timeout = {.tv_sec = 3, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
@@ -243,12 +237,10 @@ sonos_device_t *sonos_find_device(const char *name)
 
     close(sock);
 
-    // Find device matching name
     for (int i = 0; i < count; i++)
     {
         if (strcmp(devices[i].deviceName, name) == 0)
         {
-            // Copy the match into a standalone heap allocation
             sonos_device_t *found = (sonos_device_t *)malloc(sizeof(sonos_device_t));
             if (found)
                 memcpy(found, &devices[i], sizeof(sonos_device_t));
@@ -287,6 +279,7 @@ static bool retrieve_own_ip(char *ip_out, size_t ip_size)
 static httpd_handle_t notifyServer = NULL;
 
 static char last_track_uri[256] = {0};
+static char last_album_art_uri[256] = {0};
 
 static bool parse_notify(const char *body, char *album_art_uri_out, size_t album_art_uri_size,
                          char *track_uri_out, size_t track_uri_size)
@@ -324,7 +317,6 @@ static bool parse_notify(const char *body, char *album_art_uri_out, size_t album
         return false;
     }
 
-    // Extract CurrentTrackURI
     tinyxml2::XMLElement *trackURI = instanceID->FirstChildElement("CurrentTrackURI");
     if (!trackURI || !trackURI->Attribute("val"))
     {
@@ -334,7 +326,6 @@ static bool parse_notify(const char *body, char *album_art_uri_out, size_t album
     strncpy(track_uri_out, trackURI->Attribute("val"), track_uri_size - 1);
     track_uri_out[track_uri_size - 1] = '\0';
 
-    // Extract albumArtURI from CurrentTrackMetaData
     tinyxml2::XMLElement *metaData = instanceID->FirstChildElement("CurrentTrackMetaData");
     if (!metaData || !metaData->Attribute("val"))
     {
@@ -393,7 +384,13 @@ static esp_err_t notify_handler(httpd_req_t *req)
         {
             strncpy(last_track_uri, track_uri, sizeof(last_track_uri) - 1);
             ESP_LOGI(TAG, "Album art uri: %s", album_art_uri);
-            decode_album_art(album_art_uri);
+            if (strcmp(last_album_art_uri, album_art_uri) != 0) {
+                decode_album_art(album_art_uri);
+                strncpy(last_album_art_uri, album_art_uri, sizeof(last_album_art_uri) - 1);
+            } 
+            else{
+                ESP_LOGI(TAG, "Same album art uri as previous track - skipping to update");
+            }
         }
     }
 
@@ -505,7 +502,6 @@ static void downscale_80_to_64(void)
     {
         for (int x = 0; x < 64; x++)
         {
-            // Map 64x64 output pixel to 80x80 input region
             float src_x = (x / 64.0f) * 80.0f;
             float src_y = (y / 64.0f) * 80.0f;
 
@@ -527,26 +523,9 @@ static void downscale_80_to_64(void)
     }
 }
 
-uint8_t (*sonos_get_album_art_64(void))[64][3] {
-    return rgb_matrix_64;
-}
-
-// Temporary helper - REMOVE LATER!!!
-void print_rgb_matrix(void)
+uint8_t (*sonos_get_album_art_64(void))[64][3]
 {
-    printf("{");
-    for (int y = 0; y < 64; y++)
-    {
-        printf("{");
-        for (int x = 0; x < 64; x++)
-        {
-            printf("{%d,%d,%d}", rgb_matrix_64[y][x][0], rgb_matrix_64[y][x][1], rgb_matrix_64[y][x][2]);
-            if (x < 63) printf(",");
-        }
-        printf("}");
-        if (y < 63) printf(",");
-    }
-    printf("}\n");
+    return rgb_matrix_64;
 }
 
 static size_t jpeg_input_callback(JDEC *jd, uint8_t *buf, size_t len)
@@ -618,8 +597,9 @@ static bool decode_album_art(const char *url)
         return false;
     }
 
+    xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
     downscale_80_to_64();
-    // print_rgb_matrix();
+    xSemaphoreGive(sonos_album_art_mutex);
 
     free(work);
     esp_http_client_cleanup(client);

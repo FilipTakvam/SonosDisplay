@@ -1,6 +1,9 @@
 #pragma once
 
 #include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +23,7 @@ sonos_device_t *sonos_find_device(const char *name);
 void sonos_start_notify(void);
 void sonos_subscribe(const sonos_device_t *device);
 uint8_t (*sonos_get_album_art_64(void))[64][3];
+extern SemaphoreHandle_t sonos_album_art_mutex;
 
 #ifdef __cplusplus
 }
