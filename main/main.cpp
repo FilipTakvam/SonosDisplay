@@ -11,6 +11,7 @@
 
 #include "driver/gpio.h"
 
+#include "Wifi_Config.h"
 #include "Wifi_Driver.h"
 #include "Sonos.h"
 
@@ -22,7 +23,7 @@ static const char *TAG = "MAIN";
 #define DISPLAY_HEIGHT 64
 
 #define ENCODER_CLK GPIO_NUM_18
-#define ENCODER_DT  GPIO_NUM_19
+#define ENCODER_DT GPIO_NUM_19
 #define ENCODER_BTN GPIO_NUM_21
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
@@ -51,17 +52,19 @@ static volatile int last_clk_state = 0;
 static void IRAM_ATTR encoder_isr(void *arg)
 {
     int clk = gpio_get_level(ENCODER_CLK);
-    int dt  = gpio_get_level(ENCODER_DT);
+    int dt = gpio_get_level(ENCODER_DT);
 
     if (clk != last_clk_state)
     {
         if (dt != clk)
-            brightness += 5;
+            brightness += 1;
         else
-            brightness -= 5;
+            brightness -= 1;
 
-        if (brightness > 255) brightness = 255;
-        if (brightness < 5)   brightness = 5;
+        if (brightness > 255)
+            brightness = 255;
+        if (brightness < 5)
+            brightness = 5;
 
         last_clk_state = clk;
     }
@@ -71,10 +74,10 @@ static void init_encoder()
 {
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << ENCODER_CLK) | (1ULL << ENCODER_DT) | (1ULL << ENCODER_BTN),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_ANYEDGE,
+        .intr_type = GPIO_INTR_ANYEDGE,
     };
     gpio_config(&io_conf);
 
@@ -313,6 +316,23 @@ extern "C" void app_main(void)
 
     init_encoder();
     init_display();
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << ENCODER_BTN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+
+    gpio_config(&io_conf);
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    if (gpio_get_level(ENCODER_BTN) == 0)
+    {
+        ESP_LOGI(TAG, "Encoder button held at startup, entering WiFi config mode");
+        wifi_config_start_ap(); // This component will block and requires a restart of the ESP to get by this stage
+    }
 
     xTaskCreatePinnedToCore(
         display_task,
@@ -323,7 +343,11 @@ extern "C" void app_main(void)
         NULL,
         1);
 
-    wifi_driver_init();
+    char ssid[64];
+    char pass[64];
+
+    wifi_config_load(ssid, sizeof(ssid), pass, sizeof(pass));
+    wifi_driver_init(ssid, pass);
 
     xEventGroupWaitBits(
         wifi_event_group,

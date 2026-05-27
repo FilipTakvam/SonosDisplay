@@ -10,7 +10,7 @@ extern "C" {
 
 extern EventGroupHandle_t wifi_event_group;
 
-void wifi_driver_init(void);
+void wifi_driver_init(char *ssid, char *password);
 
 #ifdef __cplusplus
 }

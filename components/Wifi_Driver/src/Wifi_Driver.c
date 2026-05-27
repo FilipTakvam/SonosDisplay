@@ -11,7 +11,7 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
-#include "Wifi_Credentials.h"
+// #include "Wifi_Credentials.h"
 
 static const char *TAG = "WIFI_DRIVER";
 
@@ -44,7 +44,7 @@ static void wifi_event_handler(
     }
 }
 
-void wifi_driver_init(void)
+void wifi_driver_init(char *ssid, char *password)
 {
     wifi_event_group = xEventGroupCreate();
 
@@ -72,8 +72,8 @@ void wifi_driver_init(void)
 
     wifi_config_t wifi_config = { 0 };
 
-    strncpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strncpy((char *)wifi_config.sta.password, WIFI_PASSWORD, sizeof(wifi_config.sta.password));
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
 
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
