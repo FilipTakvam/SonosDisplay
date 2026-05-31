@@ -10,21 +10,25 @@
 #include "defines.h"
 #include "Sonos.h"
 #include "esp_log.h"
+#include "MatrixDisplay.h"
+
+#include "TuneFrame.h"
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
-
-enum AnimationState
-{
-    IDLE,
-    SLIDE_OUT_OLD,
-    PAUSE_ANIM,
-    SLIDE_IN_NEW
-};
 
 static AnimationState anim_state = IDLE;
 static uint32_t anim_start_time = 0;
 static const uint32_t anim_duration_ms = 900;
 static const uint32_t black_pause_ms = 500;
+
+static BootAnimState boot_anim_state = BOOT_FADE_IN;
+static uint32_t boot_anim_start = 0;
+
+static const uint32_t boot_fade_in_ms = 600;
+static const uint32_t boot_hold_ms = 5000;
+static const uint32_t boot_fade_out_ms = 600;
+
+static MatrixUiState ui_state = MATRIX_UI_BOOT;
 
 static uint8_t prev_album_art[64][64][3] = {};
 static uint8_t next_album_art[64][64][3] = {};
@@ -70,6 +74,11 @@ static void init_encoder()
 
     gpio_install_isr_service(0);
     gpio_isr_handler_add(ENCODER_CLK, encoder_isr, NULL);
+}
+
+void matrix_display_set_state(MatrixUiState state)
+{
+    ui_state = state;
 }
 
 static inline float ease_in_out(float t)
@@ -119,10 +128,29 @@ static void draw_composite(MatrixPanel_I2S_DMA *display,
                     img_b[src_y_b][screen_x][0],
                     img_b[src_y_b][screen_x][1],
                     img_b[src_y_b][screen_x][2]);
-            
+
             display->drawPixel(screen_x, screen_y, color);
         }
     }
+}
+
+static void draw_image(MatrixPanel_I2S_DMA *display, const uint8_t img[64][64][3])
+{
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+            display->drawPixel(x, y,
+                               display->color565(img[y][x][0], img[y][x][1], img[y][x][2]));
+}
+
+static void draw_image_dimmed(MatrixPanel_I2S_DMA *display, const uint8_t img[64][64][3], float brightness_scale)
+{
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+            display->drawPixel(x, y,
+                               display->color565(
+                                   (uint8_t)(img[y][x][0] * brightness_scale),
+                                   (uint8_t)(img[y][x][1] * brightness_scale),
+                                   (uint8_t)(img[y][x][2] * brightness_scale)));
 }
 
 static void display_task(void *pvParameters)
@@ -140,132 +168,191 @@ static void display_task(void *pvParameters)
             display->setBrightness8(applied_brightness);
         }
 
-        if (anim_state == IDLE)
+        switch (ui_state)
         {
-            xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
-            memcpy(current_art, sonos_get_album_art_64(), sizeof(current_art));
-            xSemaphoreGive(sonos_album_art_mutex);
+        case MATRIX_UI_BOOT:
+        {
+            uint32_t now = esp_log_timestamp();
+            float scale = 1.0f;
 
-            if (!has_previous)
+            if (boot_anim_state == BOOT_FADE_IN)
             {
-                memcpy(prev_album_art, current_art, sizeof(prev_album_art));
-                has_previous = true;
+                if (boot_anim_start == 0)
+                    boot_anim_start = now;
+
+                float t = (float)(now - boot_anim_start) / boot_fade_in_ms;
+                if (t > 1.0f)
+                    t = 1.0f;
+                scale = ease_in_out(t);
+
+                if (t >= 1.0f)
+                {
+                    boot_anim_state = BOOT_HOLD;
+                    boot_anim_start = now;
+                }
             }
-            else if (album_art_changed(prev_album_art, current_art))
+            else if (boot_anim_state == BOOT_HOLD)
             {
-                memcpy(next_album_art, current_art, sizeof(next_album_art));
-                anim_state = SLIDE_OUT_OLD;
-                anim_start_time = esp_log_timestamp();
+                scale = 1.0f;
+
+                if ((now - boot_anim_start) >= boot_hold_ms)
+                {
+                    boot_anim_state = BOOT_FADE_OUT;
+                    boot_anim_start = now;
+                }
+            }
+            else if (boot_anim_state == BOOT_FADE_OUT)
+            {
+                float t = (float)(now - boot_anim_start) / boot_fade_out_ms;
+                if (t > 1.0f)
+                    t = 1.0f;
+                scale = ease_in_out(1.0f - t);
+
+                if (t >= 1.0f)
+                    boot_anim_state = BOOT_DONE;
+            }
+            else // BOOT_DONE
+            {
+                display->clearScreen();
+                break;
             }
 
-            draw_composite(display,
-                           prev_album_art, 0,
-                           prev_album_art, DISPLAY_HEIGHT);
+            draw_image_dimmed(display, TuneFrame, scale);
+            break;
+        }
+        case MATRIX_UI_WIFI_WAIT:
+        {
+            // WIFI text
+            break;
         }
 
-        else if (anim_state == SLIDE_OUT_OLD)
+        case MATRIX_UI_FAULT:
+            // Fault code
+            break;
+
+        case MATRIX_UI_PLAYBACK:
         {
-            float t = get_t(anim_start_time, anim_duration_ms);
-            int offset = (int)(t * -DISPLAY_HEIGHT);
-
-            draw_composite(display,
-                           prev_album_art, offset,
-                           next_album_art, DISPLAY_HEIGHT);
-
-            if (t >= 1.0f)
+            if (anim_state == IDLE)
             {
-                anim_state = PAUSE_ANIM;
-                anim_start_time = esp_log_timestamp();
+                xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
+                memcpy(current_art, sonos_get_album_art_64(), sizeof(current_art));
+                xSemaphoreGive(sonos_album_art_mutex);
+
+                if (!has_previous)
+                {
+                    memcpy(prev_album_art, current_art, sizeof(prev_album_art));
+                    has_previous = true;
+                }
+                else if (album_art_changed(prev_album_art, current_art))
+                {
+                    memcpy(next_album_art, current_art, sizeof(next_album_art));
+                    anim_state = SLIDE_OUT_OLD;
+                    anim_start_time = esp_log_timestamp();
+                }
+
+                draw_composite(display, prev_album_art, 0, prev_album_art, DISPLAY_HEIGHT);
             }
-        }
-
-        else if (anim_state == PAUSE_ANIM)
-        {
-            draw_composite(display,
-                           prev_album_art, DISPLAY_HEIGHT,
-                           next_album_art, DISPLAY_HEIGHT);
-
-            if ((esp_log_timestamp() - anim_start_time) >= black_pause_ms)
+            else if (anim_state == SLIDE_OUT_OLD)
             {
-                anim_state = SLIDE_IN_NEW;
-                anim_start_time = esp_log_timestamp();
+                float t = get_t(anim_start_time, anim_duration_ms);
+                int offset = (int)(t * -DISPLAY_HEIGHT);
+
+                draw_composite(display, prev_album_art, offset, next_album_art, DISPLAY_HEIGHT);
+
+                if (t >= 1.0f)
+                {
+                    anim_state = PAUSE_ANIM;
+                    anim_start_time = esp_log_timestamp();
+                }
             }
-        }
-
-        else if (anim_state == SLIDE_IN_NEW)
-        {
-            float t = get_t(anim_start_time, anim_duration_ms);
-            int offset = (int)((1.0f - t) * DISPLAY_HEIGHT);
-
-            draw_composite(display,
-                           prev_album_art, DISPLAY_HEIGHT,
-                           next_album_art, offset);
-
-            if (t >= 1.0f)
+            else if (anim_state == PAUSE_ANIM)
             {
-                memcpy(prev_album_art, next_album_art, sizeof(prev_album_art));
-                anim_state = IDLE;
+                draw_composite(display, prev_album_art, DISPLAY_HEIGHT, next_album_art, DISPLAY_HEIGHT);
+
+                if ((esp_log_timestamp() - anim_start_time) >= black_pause_ms)
+                {
+                    anim_state = SLIDE_IN_NEW;
+                    anim_start_time = esp_log_timestamp();
+                }
             }
+            else if (anim_state == SLIDE_IN_NEW)
+            {
+                float t = get_t(anim_start_time, anim_duration_ms);
+                int offset = (int)((1.0f - t) * DISPLAY_HEIGHT);
+
+                draw_composite(display,
+                               prev_album_art, DISPLAY_HEIGHT,
+                               next_album_art, offset);
+
+                if (t >= 1.0f)
+                {
+                    memcpy(prev_album_art, next_album_art, sizeof(prev_album_art));
+                    anim_state = IDLE;
+                }
+            }
+            break;
         }
+        } // switch
 
         vTaskDelay(pdMS_TO_TICKS(16));
     }
 }
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-void matrix_display_init()
-{
-    HUB75_I2S_CFG::i2s_pins _pins = {
-        R1_PIN, G1_PIN, B1_PIN,
-        R2_PIN, G2_PIN, B2_PIN,
-        A_PIN, B_PIN, C_PIN, D_PIN, E_PIN,
-        LAT_PIN, OE_PIN, CLK_PIN};
-
-    HUB75_I2S_CFG mxconfig(
-        DISPLAY_WIDTH,
-        DISPLAY_HEIGHT,
-        1,
-        _pins,
-        HUB75_I2S_CFG::FM6126A);
-    mxconfig.clkphase = false;
-
-    dma_display = new MatrixPanel_I2S_DMA(mxconfig);
-
-    if (!dma_display->begin())
+    void matrix_display_init()
     {
-        return;
+        HUB75_I2S_CFG::i2s_pins _pins = {
+            R1_PIN, G1_PIN, B1_PIN,
+            R2_PIN, G2_PIN, B2_PIN,
+            A_PIN, B_PIN, C_PIN, D_PIN, E_PIN,
+            LAT_PIN, OE_PIN, CLK_PIN};
+
+        HUB75_I2S_CFG mxconfig(
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
+            1,
+            _pins,
+            HUB75_I2S_CFG::FM6126A);
+        mxconfig.clkphase = false;
+
+        dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+
+        if (!dma_display->begin())
+        {
+            return;
+        }
+
+        dma_display->setBrightness8(brightness);
+        dma_display->clearScreen();
+
+        init_encoder();
     }
 
-    dma_display->setBrightness8(brightness);
-    dma_display->clearScreen();
+    void matrix_display_start_task()
+    {
+        xTaskCreatePinnedToCore(
+            display_task,
+            "display_task",
+            8192,
+            dma_display,
+            5,
+            NULL,
+            1);
+    }
 
-    init_encoder();
-}
+    void matrix_display_set_brightness(int new_brightness)
+    {
+        brightness = new_brightness;
+    }
 
-void matrix_display_start_task()
-{
-    xTaskCreatePinnedToCore(
-        display_task,
-        "display_task",
-        8192,
-        dma_display,
-        5,
-        NULL,
-        1);
-}
-
-void matrix_display_set_brightness(int new_brightness)
-{
-    brightness = new_brightness;
-}
-
-int matrix_display_get_brightness()
-{
-    return brightness;
-}
+    int matrix_display_get_brightness()
+    {
+        return brightness;
+    }
 
 #ifdef __cplusplus
 }

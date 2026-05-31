@@ -20,7 +20,8 @@
 
 static const char *TAG = "MAIN";
 
-typedef struct {
+typedef struct
+{
     char speaker_name[64];
 } sonos_task_params_t;
 
@@ -42,6 +43,7 @@ void sonos_task(void *pvParameters)
 
         if (device)
         {
+            matrix_display_set_state(MATRIX_UI_PLAYBACK);
             break;
         }
 
@@ -96,8 +98,7 @@ extern "C" void app_main(void)
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
+        .intr_type = GPIO_INTR_DISABLE};
 
     gpio_config(&io_conf);
 
@@ -110,6 +111,8 @@ extern "C" void app_main(void)
     }
 
     matrix_display_start_task();
+
+    uint32_t boot_start_ms = esp_log_timestamp();
 
     char ssid[64];
     char pass[64];
@@ -132,6 +135,12 @@ extern "C" void app_main(void)
     {
         strcpy(sonos_speaker_name, "Living Room");
         ESP_LOGW(TAG, "Failed to load Sonos speaker name, using default: %s", sonos_speaker_name);
+    }
+
+    uint32_t elapsed_boot_ms = esp_log_timestamp() - boot_start_ms;
+    if (elapsed_boot_ms < 6000)
+    {
+        vTaskDelay(pdMS_TO_TICKS(6000 - elapsed_boot_ms));
     }
 
     sonos_task_params_t *params = (sonos_task_params_t *)malloc(sizeof(sonos_task_params_t));

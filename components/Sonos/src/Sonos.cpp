@@ -530,15 +530,45 @@ uint8_t (*sonos_get_album_art_64(void))[64][3]
 
 static size_t jpeg_input_callback(JDEC *jd, uint8_t *buf, size_t len)
 {
-    jpeg_http_input_t *input = (jpeg_http_input_t*)jd->device;
+    jpeg_http_input_t *input = (jpeg_http_input_t *)jd->device;
 
-    int read = esp_http_client_read(input->client, (char*)input->chunk, len);
-    if (read <= 0) return 0;
+    size_t total_read = 0;
 
-    if (buf)
-        memcpy(buf, input->chunk, read);
+    while (total_read < len)
+    {
+        int read = esp_http_client_read(
+            input->client,
+            (char *)input->chunk + total_read,
+            len - total_read);
 
-    return read;
+        if (read > 0)
+        {
+            total_read += read;
+        }
+        else if (read == 0)
+        {
+            // Connection closed cleanly
+            break;
+        }
+        else
+        {
+            // read < 0
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                // Transient — give the TCP stack a moment and retry
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            // A real error
+            ESP_LOGE(TAG, "jpeg_input_callback: read error, errno=%d", errno);
+            break;
+        }
+    }
+
+    if (buf && total_read > 0)
+        memcpy(buf, input->chunk, total_read);
+
+    return total_read;
 }
 
 static uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b)
