@@ -105,7 +105,7 @@ Communication with Sonos speakers:
 
 To reset configuration, erase NVS flash:
 ```bash
-idf.py -p COM3 erase_flash
+idf.py -p PORT erase_flash
 ```
 ## License
 
