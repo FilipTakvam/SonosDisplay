@@ -541,6 +541,45 @@ static size_t jpeg_input_callback(JDEC *jd, uint8_t *buf, size_t len)
     return read;
 }
 
+static uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return ((r >> 3) << 11) |  // 5 bits red
+           ((g >> 2) << 5)  |  // 6 bits green
+           (b >> 3);           // 5 bits blue
+}
+
+void sonos_log_album_art_64(void)
+{
+xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
+
+    printf("{\n");
+
+    for (int y = 0; y < 64; y++)
+    {
+        for (int x = 0; x < 64; x++)
+        {
+            uint16_t rgb565 = rgb888_to_rgb565(
+                rgb_matrix_64[y][x][0],
+                rgb_matrix_64[y][x][1],
+                rgb_matrix_64[y][x][2]);
+
+            printf("0x%04X", rgb565);
+
+            if (!(y == 63 && x == 63))
+                printf(",");
+
+            if (((y * 64 + x + 1) % 16) == 0)
+                printf("\n");
+            else
+                printf(" ");
+        }
+    }
+
+    printf("};\n");
+
+    xSemaphoreGive(sonos_album_art_mutex);
+}
+
 static bool decode_album_art(const char *url)
 {
     esp_http_client_config_t config = {
@@ -600,6 +639,8 @@ static bool decode_album_art(const char *url)
     xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
     downscale_80_to_64();
     xSemaphoreGive(sonos_album_art_mutex);
+
+    // sonos_log_album_art_64();
 
     free(work);
     esp_http_client_cleanup(client);

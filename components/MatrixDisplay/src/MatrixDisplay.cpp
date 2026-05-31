@@ -9,6 +9,7 @@
 #include "pinDefinitions.h"
 #include "defines.h"
 #include "Sonos.h"
+#include "esp_log.h"
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 
@@ -118,7 +119,7 @@ static void draw_composite(MatrixPanel_I2S_DMA *display,
                     img_b[src_y_b][screen_x][0],
                     img_b[src_y_b][screen_x][1],
                     img_b[src_y_b][screen_x][2]);
-
+            
             display->drawPixel(screen_x, screen_y, color);
         }
     }
@@ -229,6 +230,7 @@ void matrix_display_init()
         1,
         _pins,
         HUB75_I2S_CFG::FM6126A);
+    mxconfig.clkphase = false;
 
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
 
