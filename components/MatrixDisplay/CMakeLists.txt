@@ -1,0 +1,12 @@
+idf_component_register(
+                    SRCS
+                        "src/MatrixDisplay.cpp"
+                    INCLUDE_DIRS
+                        "include"
+                    REQUIRES
+                        ESP32-HUB75-MatrixPanel-I2S-DMA
+                        Sonos
+                    PRIV_REQUIRES
+                        freertos
+                        driver
+                    )

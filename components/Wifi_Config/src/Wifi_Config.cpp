@@ -31,6 +31,7 @@ static const char *HTML =
     "<form method='POST' action='/save'>"
     "<label>Network name (SSID)<input name='ssid' type='text' required autocomplete='off'></label>"
     "<label>Password<input name='pass' type='password' autocomplete='off'></label>"
+    "<label>Sonos Speaker Name<input name='sonos_name' type='text' required autocomplete='off'></label>"
     "<button type='submit'>Save &amp; Reboot</button>"
     "</form></body></html>";
 
@@ -98,7 +99,7 @@ static esp_err_t handle_root(httpd_req_t *req)
 
 static esp_err_t handle_save(httpd_req_t *req)
 {
-    char body[256] = {0};
+    char body[512] = {0};
     int received = httpd_req_recv(req, body, sizeof(body) -1);
     if  (received <= 0)
     {
@@ -110,17 +111,21 @@ static esp_err_t handle_save(httpd_req_t *req)
 
     char ssid[64] = {0};
     char pass[64] = {0};
+    char sonos_name[64] = {0};
 
     parse_form_field(body, "ssid", ssid, sizeof(ssid));
     parse_form_field(body, "pass", pass, sizeof(pass));
+    parse_form_field(body, "sonos_name", sonos_name, sizeof(sonos_name));
 
     ESP_LOGI(TAG, "Saving SSID: %s", ssid);
+    ESP_LOGI(TAG, "Saving Sonos name: %s", sonos_name);
 
     nvs_handle_t nvs;
     if(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK)
     {
         nvs_set_str(nvs, NVS_KEY_SSID, ssid);
         nvs_set_str(nvs, NVS_KEY_PASS, pass);
+        nvs_set_str(nvs, NVS_KEY_SONOS_NAME, sonos_name);
         nvs_commit(nvs);
         nvs_close(nvs);
     }
@@ -204,6 +209,17 @@ bool wifi_config_load(char *ssid_out, size_t ssid_size, char *pass_out, size_t p
     bool ok = true;
     ok &= (nvs_get_str(nvs, NVS_KEY_SSID, ssid_out, &ssid_size) == ESP_OK);
     ok &= (nvs_get_str(nvs, NVS_KEY_PASS, pass_out, &pass_size) == ESP_OK);
+    nvs_close(nvs);
+    return ok;
+}
+
+bool wifi_config_load_sonos_name(char *name_out, size_t name_size)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK)
+        return false;
+
+    bool ok = (nvs_get_str(nvs, NVS_KEY_SONOS_NAME, name_out, &name_size) == ESP_OK);
     nvs_close(nvs);
     return ok;
 }

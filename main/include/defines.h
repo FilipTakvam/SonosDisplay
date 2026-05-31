@@ -1,0 +1,2 @@
+#define DISPLAY_HEIGHT 64
+#define DISPLAY_WIDTH 64
