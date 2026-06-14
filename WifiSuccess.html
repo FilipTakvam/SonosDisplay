@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TUNEFRAME Setup</title>
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --card: #161616;
+            --border: #2e2e2e;
+            --text: #f5f5f5;
+            --muted: #8a8a8a;
+            --accent: #f5f5f5;
+            --radius: 10px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .wordmark {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0.18em;
+            margin-bottom: 24px;
+            color: var(--text);
+        }
+
+        .card {
+            width: 100%;
+            max-width: 380px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 32px 28px;
+        }
+
+        .icon {
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0 0 8px;
+            letter-spacing: 0.06em;
+        }
+
+        p {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.6;
+            margin: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wordmark">TUNEFRAME</div>
+    <div class="card">
+        <div class="icon"> <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#f5f5f5" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9 12l2 2 4-4" />
+            </svg> </div>
+        <h1>Network saved</h1>
+        <p>Power the display off and on. Album art streaming will be available after it reconnects if everything has been configured correctly.<br><br>You can
+            close this page.</p>
+    </div>
+</body>
+
+</html>

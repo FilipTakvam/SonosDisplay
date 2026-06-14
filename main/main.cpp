@@ -137,12 +137,6 @@ extern "C" void app_main(void)
         ESP_LOGW(TAG, "Failed to load Sonos speaker name, using default: %s", sonos_speaker_name);
     }
 
-    uint32_t elapsed_boot_ms = esp_log_timestamp() - boot_start_ms;
-    if (elapsed_boot_ms < 6000)
-    {
-        vTaskDelay(pdMS_TO_TICKS(6000 - elapsed_boot_ms));
-    }
-
     sonos_task_params_t *params = (sonos_task_params_t *)malloc(sizeof(sonos_task_params_t));
     strncpy(params->speaker_name, sonos_speaker_name, sizeof(params->speaker_name) - 1);
 
@@ -153,6 +147,12 @@ extern "C" void app_main(void)
         params,
         5,
         NULL);
+
+    uint32_t elapsed_boot_ms = esp_log_timestamp() - boot_start_ms;
+    if (elapsed_boot_ms < 6000)
+    {
+        vTaskDelay(pdMS_TO_TICKS(6000 - elapsed_boot_ms));
+    }
 
     ESP_LOGI(TAG, "Free heap after task create: %lu", esp_get_free_heap_size());
 }
