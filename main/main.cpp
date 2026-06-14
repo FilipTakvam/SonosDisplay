@@ -62,6 +62,7 @@ void sonos_task(void *pvParameters)
 
         sonos_start_notify();
         sonos_subscribe(device);
+        sonos_start_resubscribe_task(device);
         free(device);
     }
     else
@@ -106,7 +107,6 @@ extern "C" void app_main(void)
 
     if (gpio_get_level(ENCODER_BTN) == 0)
     {
-        ESP_LOGI(TAG, "Encoder button held at startup, entering WiFi config mode");
         wifi_config_start_ap(); // This component will block and requires a restart of the ESP to get by this stage
     }
 

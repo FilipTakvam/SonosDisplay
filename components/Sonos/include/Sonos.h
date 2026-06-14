@@ -15,13 +15,14 @@ extern "C" {
 
 typedef struct {
     char Ipv4[16];
-    char deviceName[16];
+    char deviceName[64];
 } sonos_device_t;
 
 sonos_device_t *sonos_find_device(const char *name);
 
 void sonos_start_notify(void);
 void sonos_subscribe(const sonos_device_t *device);
+void sonos_start_resubscribe_task(const sonos_device_t *device);
 uint8_t (*sonos_get_album_art_64(void))[64][3];
 extern SemaphoreHandle_t sonos_album_art_mutex;
 

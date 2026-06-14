@@ -21,6 +21,10 @@ static const char *TAG = "SONOS";
 #define SSDP_IP "239.255.255.250"
 #define SSDP_PORT 1900
 
+// Sonos subscriptions are accepted with "Timeout: Second-3600".
+// Renew well before that expires to avoid losing events.
+#define SONOS_RESUBSCRIBE_INTERVAL_MS (3000 * 1000) // 50 minutes
+
 static const char *M_SEARCH_MSG =
     "M-SEARCH * HTTP/1.1\r\n"
     "HOST: 239.255.255.250:1900\r\n"
@@ -30,6 +34,7 @@ static const char *M_SEARCH_MSG =
     "\r\n";
 
 static bool decode_album_art(const char *url);
+static void sonos_resub_task(void *pvParameters);
 
 SemaphoreHandle_t sonos_album_art_mutex = NULL;
 
@@ -464,6 +469,48 @@ void sonos_subscribe(const sonos_device_t *device)
     ESP_LOGI(TAG, "SUBSCRIBE event response %d", status);
 
     esp_http_client_cleanup(client);
+}
+
+// Periodically re-sends a fresh SUBSCRIBE request so the Sonos
+// device keeps sending NOTIFY events past the 3600s timeout.
+// Owns the device copy passed in (frees it on exit, which never
+// happens in normal operation since the loop runs forever).
+static void sonos_resub_task(void *pvParameters)
+{
+    sonos_device_t *device = (sonos_device_t *)pvParameters;
+
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(SONOS_RESUBSCRIBE_INTERVAL_MS));
+
+        ESP_LOGI(TAG, "Renewing Sonos subscription for '%s'...", device->deviceName);
+        sonos_subscribe(device);
+    }
+
+    // Unreachable in normal operation, kept for completeness.
+    free(device);
+    vTaskDelete(NULL);
+}
+
+void sonos_start_resubscribe_task(const sonos_device_t *device)
+{
+    sonos_device_t *device_copy = (sonos_device_t *)malloc(sizeof(sonos_device_t));
+
+    if (!device_copy)
+    {
+        ESP_LOGE(TAG, "Out of memory while starting resubscribe task");
+        return;
+    }
+
+    memcpy(device_copy, device, sizeof(sonos_device_t));
+
+    xTaskCreate(
+        sonos_resub_task,
+        "sonos_resub_task",
+        4096,
+        device_copy,
+        5,
+        NULL);
 }
 
 typedef struct {
