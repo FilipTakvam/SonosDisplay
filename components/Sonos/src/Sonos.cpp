@@ -12,6 +12,7 @@
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "tjpgd.h"
 
 #include "tinyxml2.h"
@@ -37,6 +38,11 @@ static bool decode_album_art(const char *url);
 static void sonos_resub_task(void *pvParameters);
 
 SemaphoreHandle_t sonos_album_art_mutex = NULL;
+
+// Holds the subscription identifier returned by the device on the
+// initial SUBSCRIBE. Renewals reference this instead of re-registering
+// a callback URL, which would create a duplicate subscription.
+static char subscription_sid[128] = {0};
 
 static bool parse_room_name(const char *xml, char *room_name_out, size_t room_name_size)
 {
@@ -370,6 +376,10 @@ static esp_err_t notify_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    ESP_LOGI(TAG, "Heap before parse: free=%u largest_free_block=%u",
+             heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     int received = 0;
     int chunk;
     while ((chunk = httpd_req_recv(req, body + received, NOTIFY_MALLOC_SIZE - 1 - received)) > 0)
@@ -389,11 +399,13 @@ static esp_err_t notify_handler(httpd_req_t *req)
         {
             strncpy(last_track_uri, track_uri, sizeof(last_track_uri) - 1);
             ESP_LOGI(TAG, "Album art uri: %s", album_art_uri);
-            if (strcmp(last_album_art_uri, album_art_uri) != 0) {
+            if (strcmp(last_album_art_uri, album_art_uri) != 0)
+            {
                 decode_album_art(album_art_uri);
                 strncpy(last_album_art_uri, album_art_uri, sizeof(last_album_art_uri) - 1);
-            } 
-            else{
+            }
+            else
+            {
                 ESP_LOGI(TAG, "Same album art uri as previous track - skipping to update");
             }
         }
@@ -426,24 +438,36 @@ void sonos_start_notify(void)
     ESP_LOGI(TAG, "Notify server started on port 8080");
 }
 
+// Captures the SID response header from the initial SUBSCRIBE so that
+// renewals can reference the existing subscription instead of creating
+// a new one.
+static esp_err_t subscribe_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id)
+    {
+    case HTTP_EVENT_ON_HEADER:
+        if (strcasecmp(evt->header_key, "SID") == 0)
+        {
+            strncpy(subscription_sid, evt->header_value, sizeof(subscription_sid) - 1);
+            subscription_sid[sizeof(subscription_sid) - 1] = '\0';
+            ESP_LOGI(TAG, "Captured subscription SID: %s", subscription_sid);
+        }
+        break;
+    default:
+        break;
+    }
+    return ESP_OK;
+}
+
 void sonos_subscribe(const sonos_device_t *device)
 {
     char url[64];
     snprintf(url, sizeof(url), "http://%s:1400/MediaRenderer/AVTransport/Event", device->Ipv4);
 
-    char ownIP[16];
-
-    if (!retrieve_own_ip(ownIP, sizeof(ownIP)))
-    {
-        return;
-    }
-
-    char callback[64];
-    snprintf(callback, sizeof(callback), "<http://%s:8080/notify>", ownIP);
-
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_SUBSCRIBE,
+        .event_handler = subscribe_event_handler,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -454,25 +478,62 @@ void sonos_subscribe(const sonos_device_t *device)
         return;
     }
 
-    esp_http_client_set_header(client, "callback", callback);
-    esp_http_client_set_header(client, "NT", "upnp:event");
-    esp_http_client_set_header(client, "Timeout", "Second-3600");
+    bool is_renewal = (subscription_sid[0] != '\0');
+
+    if (is_renewal)
+    {
+        // Renewal: reference the existing subscription and refresh its
+        // timeout. Do NOT send callback/NT - that would register a
+        // second, separate subscription on the device.
+        esp_http_client_set_header(client, "SID", subscription_sid);
+        esp_http_client_set_header(client, "Timeout", "Second-3600");
+    }
+    else
+    {
+        // Initial subscribe: register our callback URL to start receiving
+        // events. The device responds with a SID we capture and reuse for
+        // all future renewals.
+        char ownIP[16];
+
+        if (!retrieve_own_ip(ownIP, sizeof(ownIP)))
+        {
+            esp_http_client_cleanup(client);
+            return;
+        }
+
+        char callback[64];
+        snprintf(callback, sizeof(callback), "<http://%s:8080/notify>", ownIP);
+
+        esp_http_client_set_header(client, "callback", callback);
+        esp_http_client_set_header(client, "NT", "upnp:event");
+        esp_http_client_set_header(client, "Timeout", "Second-3600");
+    }
 
     esp_err_t err = esp_http_client_perform(client);
 
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "SUBSCRIBE event failed");
+        ESP_LOGE(TAG, "%s event failed", is_renewal ? "RESUBSCRIBE" : "SUBSCRIBE");
     }
 
     int status = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "SUBSCRIBE event response %d", status);
+    ESP_LOGI(TAG, "%s event response %d", is_renewal ? "RESUBSCRIBE" : "SUBSCRIBE", status);
+
+    // A failed renewal (e.g. device forgot the SID after a reboot) should
+    // fall back to a fresh initial subscribe next time, rather than keep
+    // referencing a SID the device no longer recognizes.
+    if (is_renewal && status != 200)
+    {
+        ESP_LOGW(TAG, "Renewal failed, will attempt a fresh subscription next cycle");
+        subscription_sid[0] = '\0';
+    }
 
     esp_http_client_cleanup(client);
 }
 
-// Periodically re-sends a fresh SUBSCRIBE request so the Sonos
-// device keeps sending NOTIFY events past the 3600s timeout.
+// Periodically re-sends a SUBSCRIBE request to renew the existing
+// subscription (using its SID) so the Sonos device keeps sending NOTIFY
+// events past the 3600s timeout.
 // Owns the device copy passed in (frees it on exit, which never
 // happens in normal operation since the loop runs forever).
 static void sonos_resub_task(void *pvParameters)
@@ -513,7 +574,8 @@ void sonos_start_resubscribe_task(const sonos_device_t *device)
         NULL);
 }
 
-typedef struct {
+typedef struct
+{
     esp_http_client_handle_t client;
     uint8_t chunk[512];
 } jpeg_http_input_t;
@@ -522,7 +584,7 @@ static uint8_t rgb_matrix[80][80][3];
 
 static int jpeg_output_callback(JDEC *jd, void *bitmap, JRECT *rect)
 {
-    uint8_t *pixels = (uint8_t*)bitmap;
+    uint8_t *pixels = (uint8_t *)bitmap;
     int pixel_idx = 0;
 
     for (int y = rect->top; y <= rect->bottom; y++)
@@ -562,7 +624,7 @@ static void downscale_80_to_64(void)
 
             for (int c = 0; c < 3; c++)
             {
-                float top    = rgb_matrix[y0][x0][c] * (1 - fx) + rgb_matrix[y0][x1][c] * fx;
+                float top = rgb_matrix[y0][x0][c] * (1 - fx) + rgb_matrix[y0][x1][c] * fx;
                 float bottom = rgb_matrix[y1][x0][c] * (1 - fx) + rgb_matrix[y1][x1][c] * fx;
                 rgb_matrix_64[y][x][c] = (uint8_t)(top * (1 - fy) + bottom * fy);
             }
@@ -588,26 +650,24 @@ static size_t jpeg_input_callback(JDEC *jd, uint8_t *buf, size_t len)
             (char *)input->chunk + total_read,
             len - total_read);
 
+        int saved_errno = errno; // capture immediately
+
         if (read > 0)
         {
             total_read += read;
         }
         else if (read == 0)
         {
-            // Connection closed cleanly
             break;
         }
         else
         {
-            // read < 0
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK)
             {
-                // Transient — give the TCP stack a moment and retry
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
-            // A real error
-            ESP_LOGE(TAG, "jpeg_input_callback: read error, errno=%d", errno);
+            ESP_LOGE(TAG, "jpeg_input_callback: read error, errno=%d", saved_errno);
             break;
         }
     }
@@ -620,14 +680,14 @@ static size_t jpeg_input_callback(JDEC *jd, uint8_t *buf, size_t len)
 
 static uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
-    return ((r >> 3) << 11) |  // 5 bits red
-           ((g >> 2) << 5)  |  // 6 bits green
-           (b >> 3);           // 5 bits blue
+    return ((r >> 3) << 11) | // 5 bits red
+           ((g >> 2) << 5) |  // 6 bits green
+           (b >> 3);          // 5 bits blue
 }
 
 void sonos_log_album_art_64(void)
 {
-xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
+    xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
 
     printf("{\n");
 
@@ -660,8 +720,8 @@ xSemaphoreTake(sonos_album_art_mutex, portMAX_DELAY);
 static bool decode_album_art(const char *url)
 {
     esp_http_client_config_t config = {
-        .url               = url,
-        .timeout_ms        = 5000,
+        .url = url,
+        .timeout_ms = 5000,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
@@ -685,7 +745,7 @@ static bool decode_album_art(const char *url)
     esp_http_client_fetch_headers(client);
 
     JDEC jd;
-    jpeg_http_input_t input = { .client = client };
+    jpeg_http_input_t input = {.client = client};
 
     void *work = malloc(TJPGD_WORK_SIZE);
     if (!work)

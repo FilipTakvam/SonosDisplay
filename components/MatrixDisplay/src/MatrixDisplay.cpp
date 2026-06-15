@@ -13,6 +13,7 @@
 #include "MatrixDisplay.h"
 
 #include "TuneFrame.h"
+#include "WifiFault.h"
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 
@@ -35,7 +36,7 @@ static uint8_t next_album_art[64][64][3] = {};
 
 static bool has_previous = false;
 
-static volatile int brightness = 30;
+static volatile int brightness = 100;
 static volatile int last_clk_state = 0;
 
 static const int SNAKE_PERIMETER = (DISPLAY_WIDTH + DISPLAY_HEIGHT - 2) * 2; // 252
@@ -381,7 +382,7 @@ static void display_task(void *pvParameters)
         }
 
         case MATRIX_UI_FAULT:
-            // Fault code
+            draw_image(display, WifiFault);
             break;
 
         case MATRIX_UI_PLAYBACK:

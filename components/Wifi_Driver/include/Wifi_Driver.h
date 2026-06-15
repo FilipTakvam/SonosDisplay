@@ -7,6 +7,7 @@ extern "C" {
 #endif
 
 #define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
 
 extern EventGroupHandle_t wifi_event_group;
 

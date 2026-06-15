@@ -76,7 +76,6 @@ void sonos_task(void *pvParameters)
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "Free heap at start: %lu", esp_get_free_heap_size());
 
     esp_err_t ret = nvs_flash_init();
 
@@ -88,8 +87,6 @@ extern "C" void app_main(void)
     }
 
     ESP_ERROR_CHECK(ret);
-
-    ESP_LOGI(TAG, "Free heap after NVS: %lu", esp_get_free_heap_size());
 
     sonos_album_art_mutex = xSemaphoreCreateMutex();
 
@@ -120,15 +117,24 @@ extern "C" void app_main(void)
     wifi_config_load(ssid, sizeof(ssid), pass, sizeof(pass));
     wifi_driver_init(ssid, pass);
 
-    xEventGroupWaitBits(
-        wifi_event_group,
-        WIFI_CONNECTED_BIT,
-        pdFALSE,
-        pdTRUE,
-        portMAX_DELAY);
+    uint32_t elapsed_boot_ms = esp_log_timestamp() - boot_start_ms;
+    if (elapsed_boot_ms < 6000)
+    {
+        vTaskDelay(pdMS_TO_TICKS(6000 - elapsed_boot_ms));
+    }
 
-    ESP_LOGI(TAG, "Free heap after WiFi: %lu", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "Network ready, starting Sonos...");
+    EventBits_t status_bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE,
+        pdFALSE,
+        portMAX_DELAY);
+    
+    if (status_bits & WIFI_FAIL_BIT)
+    {
+        matrix_display_set_state(MATRIX_UI_FAULT);
+        vTaskDelay(portMAX_DELAY);
+    }
 
     char sonos_speaker_name[64] = {0};
     if (!wifi_config_load_sonos_name(sonos_speaker_name, sizeof(sonos_speaker_name)))
@@ -147,12 +153,4 @@ extern "C" void app_main(void)
         params,
         5,
         NULL);
-
-    uint32_t elapsed_boot_ms = esp_log_timestamp() - boot_start_ms;
-    if (elapsed_boot_ms < 6000)
-    {
-        vTaskDelay(pdMS_TO_TICKS(6000 - elapsed_boot_ms));
-    }
-
-    ESP_LOGI(TAG, "Free heap after task create: %lu", esp_get_free_heap_size());
 }

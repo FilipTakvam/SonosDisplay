@@ -11,11 +11,11 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
-// #include "Wifi_Credentials.h"
+#define MAX_RETRIES 5
+EventGroupHandle_t wifi_event_group;
+static int retry_count = 0;
 
 static const char *TAG = "WIFI_DRIVER";
-
-EventGroupHandle_t wifi_event_group;
 
 static void wifi_event_handler(
     void *arg,
@@ -30,12 +30,25 @@ static void wifi_event_handler(
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
-        ESP_LOGW(TAG, "Disconnected. Retrying...");
-        esp_wifi_connect();
+        wifi_event_sta_disconnected_t *desc = (wifi_event_sta_disconnected_t*)event_data;
+        ESP_LOGW(TAG, "Disconnected. %d", desc->reason);
         xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+
+        if (retry_count < MAX_RETRIES)
+        {
+            retry_count++;
+            esp_wifi_connect();
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to connect after max retries");
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+        }
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
+        retry_count = 0;
+
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
 
         ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
